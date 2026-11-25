@@ -1,0 +1,213 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [ "main", "master" ]
+    tags: [ "v*" ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write   # لازم لنشر الـ APK في Releases عند إنشاء tag
+
+concurrency:
+  group: android-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools platforms;android-33 build-tools;33.0.2"
+
+      - name: Set up Gradle 8.4
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.4'
+
+      # كاش للمكتبة والنماذج (~200MB) حتى لا تُنزَّل في كل تشغيل. يتجدد تلقائياً عند تعديل هذا الملف.
+      - name: Cache AAR and models
+        id: models-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            app/libs
+            app/src/main/assets/dii
+            app/src/main/assets/moonshine-ar
+          key: nova-models-v2-${{ hashFiles('.github/workflows/android-apk.yml') }}
+
+      # مكتبة الصوت sherpa-onnx (AAR الرسمي من GitHub Releases) - لا تُرفع للمستودع.
+      - name: Download sherpa-onnx AAR
+        if: steps.models-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p app/libs
+          curl -fL --retry 5 --retry-delay 5 \
+            -o app/libs/sherpa-onnx-1.13.5.aar \
+            https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.5/sherpa-onnx-1.13.5.aar
+          ls -lh app/libs
+          unzip -l app/libs/sherpa-onnx-1.13.5.aar | grep -E "classes.jar|arm64-v8a/libsherpa-onnx-jni.so"
+
+      # صوت Dii العربي (CC BY-NC-SA 4.0 - استخدام غير تجاري فقط).
+      - name: Download Dii Arabic voice model
+        if: steps.models-cache.outputs.cache-hit != 'true'
+        run: |
+          python -m pip install --upgrade huggingface_hub
+          python - <<'PY'
+          import shutil, sys
+          from pathlib import Path
+          from huggingface_hub import hf_hub_download, snapshot_download, list_repo_files
+
+          target = Path("app/src/main/assets/dii")
+          target.mkdir(parents=True, exist_ok=True)
+
+          MAIN_REPO = "csukuangfj/vits-piper-ar_JO-SA_dii-high"
+          INT8_REPO = "csukuangfj/vits-piper-ar_JO-SA_dii-high-int8"
+          MODEL = "ar_JO-SA_dii-high.onnx"
+
+          def attempt(fn, what, revisions):
+              # نجرب النسخة المثبتة أولاً ثم الفرع الرئيسي إن لم تُقبل.
+              last = None
+              for rev in revisions:
+                  try:
+                      return fn(rev)
+                  except Exception as e:
+                      last = e
+                      print(f"[warn] {what} failed with revision={rev}: {e}")
+              raise SystemExit(f"[error] {what} failed: {last}")
+
+          attempt(lambda rev: snapshot_download(
+              repo_id=MAIN_REPO, revision=rev,
+              allow_patterns=["tokens.txt", "espeak-ng-data/**"],
+              local_dir=str(target)),
+              "tokens + espeak-ng-data", ["a07b7d2", "main"])
+
+          def fetch_model(repo, rev):
+              try:
+                  return hf_hub_download(repo_id=repo, filename=MODEL,
+                                         revision=rev, local_dir=str(target))
+              except Exception:
+                  # اسم الملف قد يختلف: نأخذ أول ملف onnx في المستودع ونعيد تسميته.
+                  files = [f for f in list_repo_files(repo, revision=rev) if f.endswith(".onnx")]
+                  print(f"onnx files in {repo}:", files)
+                  if not files:
+                      raise
+                  p = hf_hub_download(repo_id=repo, filename=files[0],
+                                      revision=rev, local_dir=str(target))
+                  if Path(p).resolve() != (target / MODEL).resolve():
+                      shutil.copyfile(p, target / MODEL)
+                  return p
+
+          def get_model(rev):
+              # الأفضل نسخة int8 (أصغر)، وإن لم تتوفر نستخدم النسخة الكاملة.
+              try:
+                  return fetch_model(INT8_REPO, rev)
+              except Exception as e:
+                  print(f"[warn] int8 repo failed ({e}); trying main repo")
+                  return fetch_model(MAIN_REPO, rev)
+
+          attempt(get_model, "onnx model", ["434bb26", "main"])
+
+          shutil.rmtree(target / ".cache", ignore_errors=True)
+          (target / "MODEL_LICENSE.txt").write_text(
+              "Voice: Dii Arabic female VITS/Piper model.\n"
+              "Source model: https://huggingface.co/csukuangfj/vits-piper-ar_JO-SA_dii-high\n"
+              "INT8 model: https://huggingface.co/csukuangfj/vits-piper-ar_JO-SA_dii-high-int8\n"
+              "License: CC BY-NC-SA 4.0 (non-commercial only).\n",
+              encoding="utf-8")
+
+          # تحقق من وجود كل ما يحتاجه DiiTtsEngine وإلا يفشل البناء برسالة واضحة.
+          required = [target / MODEL, target / "tokens.txt", target / "espeak-ng-data" / "voices"]
+          missing = [str(p) for p in required if not p.exists()]
+          if missing:
+              sys.exit("[error] missing Dii files: " + ", ".join(missing))
+          for item in sorted(target.rglob("*")):
+              if item.is_file() and item.stat().st_size > 1_000_000:
+                  print(item, item.stat().st_size)
+          PY
+
+      # نموذج التعرف العربي المضمّن Moonshine Base Arabic (ترخيص Moonshine Community: غير تجاري) + Silero VAD.
+      - name: Download Moonshine Arabic ASR model
+        if: steps.models-cache.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          DEST=app/src/main/assets/moonshine-ar
+          NAME=sherpa-onnx-moonshine-base-ar-quantized-2026-02-27
+          BASE=https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models
+          mkdir -p "$DEST"
+          curl -fL --retry 5 --retry-delay 5 -o /tmp/moonshine-ar.tar.bz2 "$BASE/$NAME.tar.bz2"
+          tar xjf /tmp/moonshine-ar.tar.bz2 -C /tmp
+          ls -lh "/tmp/$NAME"
+          cp "/tmp/$NAME/encoder_model.ort" "/tmp/$NAME/decoder_model_merged.ort" "/tmp/$NAME/tokens.txt" "$DEST/"
+          # ملف الترخيص قد لا يكون موجوداً في الأرشيف: لا نفشل البناء بسببه.
+          if [ -f "/tmp/$NAME/LICENSE" ]; then
+            cp "/tmp/$NAME/LICENSE" "$DEST/MODEL_LICENSE.txt"
+          else
+            echo "Moonshine Base Arabic - Moonshine Community License (non-commercial). See https://github.com/moonshine-ai/moonshine" > "$DEST/MODEL_LICENSE.txt"
+          fi
+          curl -fL --retry 5 --retry-delay 5 -o "$DEST/silero_vad.onnx" "$BASE/silero_vad.onnx"
+          for f in encoder_model.ort decoder_model_merged.ort tokens.txt silero_vad.onnx; do
+            test -s "$DEST/$f" || { echo "[error] missing $f"; exit 1; }
+          done
+          rm -rf /tmp/moonshine-ar.tar.bz2 "/tmp/$NAME"
+          ls -lh "$DEST"
+
+      - name: Verify assets before build
+        run: |
+          set -e
+          for f in \
+            app/libs/sherpa-onnx-1.13.5.aar \
+            app/src/main/assets/dii/ar_JO-SA_dii-high.onnx \
+            app/src/main/assets/dii/tokens.txt \
+            app/src/main/assets/moonshine-ar/encoder_model.ort \
+            app/src/main/assets/moonshine-ar/decoder_model_merged.ort \
+            app/src/main/assets/moonshine-ar/tokens.txt \
+            app/src/main/assets/moonshine-ar/silero_vad.onnx; do
+            test -s "$f" || { echo "[error] missing $f"; exit 1; }
+          done
+          echo "All assets present"
+
+      - name: Build debug APK
+        run: gradle assembleDebug --no-daemon --stacktrace
+
+      - name: Rename APK
+        run: |
+          VERSION=$(grep -oP 'versionName\s+"\K[^"]+' app/build.gradle | head -n1)
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/*.apk "dist/NOVA-v${VERSION}-debug.apk"
+          echo "APK_PATH=dist/NOVA-v${VERSION}-debug.apk" >> "$GITHUB_ENV"
+          ls -lh dist
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: NOVA-APK
+          path: ${{ env.APK_PATH }}
+          if-no-files-found: error
+          retention-days: 30
+
+      # عند دفع tag مثل v10.9.2 يُنشر الـ APK تلقائياً في صفحة Releases.
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.APK_PATH }}
+          generate_release_notes: true
