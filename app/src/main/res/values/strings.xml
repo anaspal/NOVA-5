@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">NOVA</string>
+    <string name="app_description">NOVA – المساعد الذكي</string>
+    <string name="a11y_desc">البحث عن عناصر الشاشة والضغط عليها وإدخال النص والتنقل والتمرير، مع دعم أزرار المكالمات</string>
+    <string name="credit_label">تصميم وبرمجة</string>
+    <string name="credit_name">أَنَــسْ الجَعَلْ | 𝑨𝒏𝒂𝒔 𝑨𝒍-𝒋𝒂𝒂𝒍𓂆</string>
+</resources>

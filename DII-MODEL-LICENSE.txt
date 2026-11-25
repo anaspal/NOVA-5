@@ -1,0 +1,16 @@
+NOVA – Dii Arabic female voice attribution and license
+
+Model: csukuangfj/vits-piper-ar_JO-SA_dii-high
+Quantized ONNX variant: csukuangfj/vits-piper-ar_JO-SA_dii-high-int8
+Training dataset: TigreGotico/tts-train-synthetic-dii_ar-diacritics
+
+Source model: https://huggingface.co/csukuangfj/vits-piper-ar_JO-SA_dii-high
+INT8 model: https://huggingface.co/csukuangfj/vits-piper-ar_JO-SA_dii-high-int8
+
+License: Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0).
+License text: https://creativecommons.org/licenses/by-nc-sa/4.0/
+
+This model may be redistributed only under the license conditions. Attribution must be retained, adaptations must be shared under the same license, and commercial use is not permitted by this license. The packaged ONNX model is the INT8 quantized variant.
+
+Runtime: sherpa-onnx, Apache-2.0; see https://github.com/k2-fsa/sherpa-onnx
+Phonemizer data: eSpeak NG data; see https://github.com/espeak-ng/espeak-ng for its licensing and notices.
